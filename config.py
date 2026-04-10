@@ -1,37 +1,27 @@
 import os
 
-# ─────────────────────────────────────────
-# 🤖 Telegram
-# ─────────────────────────────────────────
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# ─────────────────────────────
+# Telegram
+# ─────────────────────────────
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Multiple admins: "12345,67890"
 ADMIN_IDS = [
-    int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()
+    int(x.strip())
+    for x in os.getenv("ADMIN_IDS", "").split(",")
+    if x.strip()
 ]
 
-# ─────────────────────────────────────────
-# 🔐 Bybit Multi-Account Loader
-# ─────────────────────────────────────────
-def load_bybit_accounts():
-    accounts = {}
-    i = 1
+# ─────────────────────────────
+# Bybit multi accounts
+# ─────────────────────────────
+BYBIT_API_KEY_1 = os.getenv("BYBIT_API_KEY_1")
+BYBIT_API_SECRET_1 = os.getenv("BYBIT_API_SECRET_1")
 
-    while True:
-        key = os.getenv(f"BYBIT_API_KEY_{i}")
-        secret = os.getenv(f"BYBIT_API_SECRET_{i}")
-
-        if not key or not secret:
-            break
-
-        accounts[str(i)] = {
-            "api_key": key,
-            "api_secret": secret
-        }
-
-        i += 1
-
-    return accounts
+BYBIT_API_KEY_2 = os.getenv("BYBIT_API_KEY_2")
+BYBIT_API_SECRET_2 = os.getenv("BYBIT_API_SECRET_2")
 
 
-BYBIT_ACCOUNTS = load_bybit_accounts()
+BYBIT_ACCOUNTS = {
+    "1": {"api_key": BYBIT_API_KEY_1, "api_secret": BYBIT_API_SECRET_1},
+    "2": {"api_key": BYBIT_API_KEY_2, "api_secret": BYBIT_API_SECRET_2},
+}
