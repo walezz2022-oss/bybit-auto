@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -256,6 +257,36 @@ def ads_section_text(user_id: int) -> str:
 
 
 # ─────────────────────────────────────────
+# 🔍 Extract Bybit's suggested price from an error message
+#
+# Bybit often returns the allowed limit inside retMsg, e.g.:
+#   "The price should not be larger than 90,000.51."
+#   "Price must be <= 1234567.89."
+#   "price must be >= 100.00 and <= 90000.51."
+# We find the LAST number in the message (the limit/max) and
+# strip any trailing dot Bybit appends.
+# ─────────────────────────────────────────
+def extract_bybit_price_from_error(ret_msg: str):
+    """
+    Returns a clean price string (e.g. '90000.51') if one is found
+    inside Bybit's error message, otherwise returns None.
+    """
+    # Match numbers that may have commas as thousand separators and a decimal part
+    # e.g.  90,000.51.  |  1234567.89  |  100.00
+    tokens = re.findall(r'[\d,]+(?:\.\d+)?\.?', ret_msg)
+    for token in reversed(tokens):          # limit price is usually mentioned last
+        clean = token.rstrip('.')           # remove trailing dot Bybit adds
+        clean = clean.replace(',', '')      # remove thousand-separator commas
+        try:
+            val = float(clean)
+            if val > 0:
+                return clean
+        except ValueError:
+            continue
+    return None
+
+
+# ─────────────────────────────────────────
 # 💲 Floating price calc
 # ─────────────────────────────────────────
 def calc_floating_price(ad_data: dict, float_pct: float, ngn_usdt_ref: float):
@@ -338,17 +369,68 @@ async def auto_update_loop(bot, chat_id: int, account_num: int):
                 parse_mode="Markdown",
             )
         else:
-            logger.error(f"[Acct {account_num}] Cycle {cycle} ❌ {ret_code} | {ret_msg}")
-            extra = "\n💱 Update NGN/USDT ref if rate changed" \
-                    if s["ad_data"].get("currencyId", "").upper() == "NGN" else ""
-            await bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"❌ *Acct {account_num} — Cycle {cycle} failed*\n"
-                    f"`{ret_code}` — `{ret_msg}`{extra}"
-                ),
-                parse_mode="Markdown",
-            )
+            logger.warning(f"[Acct {account_num}] Cycle {cycle} ❌ {ret_code} | {ret_msg}")
+
+            # ── Auto-retry with Bybit's suggested price ──────────────────────
+            # Bybit often tells us the allowed limit in the error message.
+            # Extract it, strip the trailing dot it appends, and retry once.
+            bybit_price = extract_bybit_price_from_error(ret_msg)
+            if bybit_price:
+                logger.info(
+                    f"[Acct {account_num}] Cycle {cycle} — retrying with Bybit price: {bybit_price}"
+                )
+                retry_result = await asyncio.get_event_loop().run_in_executor(
+                    None, modify_ad, api_key, api_secret, us["ad_id"], bybit_price, s["ad_data"]
+                )
+                retry_code = retry_result.get("retCode", retry_result.get("ret_code", -1))
+                retry_msg  = retry_result.get("retMsg",  retry_result.get("ret_msg",  ""))
+
+                if retry_code == 0:
+                    # Sync current_price to the Bybit-corrected value
+                    if mode == "fixed":
+                        try:
+                            s["current_price"] = Decimal(bybit_price)
+                        except Exception:
+                            pass
+                    logger.info(f"[Acct {account_num}] Cycle {cycle} ✅ retry → {bybit_price}")
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"✅ *Acct {account_num} — Cycle {cycle}* `{now}`\n"
+                            f"💲 `{bybit_price}` ({mode.upper()})\n"
+                            f"_(auto-corrected to Bybit limit price)_"
+                        ),
+                        parse_mode="Markdown",
+                    )
+                else:
+                    # Retry also failed — now send one failure message
+                    logger.error(
+                        f"[Acct {account_num}] Cycle {cycle} retry also failed: "
+                        f"{retry_code} | {retry_msg}"
+                    )
+                    extra = "\n💱 Update NGN/USDT ref if rate changed" \
+                            if s["ad_data"].get("currencyId", "").upper() == "NGN" else ""
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"❌ *Acct {account_num} — Cycle {cycle} failed (retry also failed)*\n"
+                            f"1st try `{ret_code}` — `{ret_msg}`\n"
+                            f"Retry `{retry_code}` — `{retry_msg}`{extra}"
+                        ),
+                        parse_mode="Markdown",
+                    )
+            else:
+                # No price found in error — send normal failure message
+                extra = "\n💱 Update NGN/USDT ref if rate changed" \
+                        if s["ad_data"].get("currencyId", "").upper() == "NGN" else ""
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"❌ *Acct {account_num} — Cycle {cycle} failed*\n"
+                        f"`{ret_code}` — `{ret_msg}`{extra}"
+                    ),
+                    parse_mode="Markdown",
+                )
 
         for _ in range(interval * 60):
             if not s["refresh_running"]:
@@ -727,11 +809,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
         else:
-            await query.edit_message_text(
-                f"❌ `{rc}` — `{rm}`",
-                reply_markup=InlineKeyboardMarkup(back_section()),
-                parse_mode="Markdown",
-            )
+            # Try to extract Bybit's suggested price and retry once
+            bybit_price = extract_bybit_price_from_error(rm)
+            if bybit_price:
+                retry_result = await asyncio.get_event_loop().run_in_executor(
+                    None, modify_ad, api_key, api_secret, us["ad_id"], bybit_price, s["ad_data"]
+                )
+                retry_rc = retry_result.get("retCode", retry_result.get("ret_code", -1))
+                retry_rm = retry_result.get("retMsg",  retry_result.get("ret_msg",  ""))
+                if retry_rc == 0:
+                    if mode == "fixed":
+                        try:
+                            s["current_price"] = Decimal(bybit_price)
+                        except Exception:
+                            pass
+                    await query.edit_message_text(
+                        f"✅ *Account {active} Updated!* Price: `{bybit_price}` ({mode.upper()})\n"
+                        f"_(auto-corrected to Bybit limit price)_\n\n"
+                        f"_{next_setup_hint(active)}_",
+                        reply_markup=InlineKeyboardMarkup(back_section()),
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"❌ *Failed (retry also failed)*\n"
+                        f"1st: `{rc}` — `{rm}`\n"
+                        f"Retry: `{retry_rc}` — `{retry_rm}`",
+                        reply_markup=InlineKeyboardMarkup(back_section()),
+                        parse_mode="Markdown",
+                    )
+            else:
+                await query.edit_message_text(
+                    f"❌ `{rc}` — `{rm}`",
+                    reply_markup=InlineKeyboardMarkup(back_section()),
+                    parse_mode="Markdown",
+                )
 
     # ── 🟢/🔴 Toggle Price Update ──
     elif data == "toggle_refresh":
