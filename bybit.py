@@ -4,6 +4,7 @@ import hashlib
 import requests
 import json
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,34 @@ def get_max_float_pct(currency_id: str, token_id: str) -> int:
 
 
 # ─────────────────────────────────────────
-# 🔐 Signature  (credentials passed in)
+# Payment type ID → display name
+# ─────────────────────────────────────────
+PAYMENT_TYPE_MAP = {
+    "14":  "Bank Transfer",
+    "62":  "Moniepoint",
+    "377": "Balance",
+    "470": "PalmPay",
+    "500": "Kuda",
+    "520": "OPay",
+    "522": "Paycom / OPay",
+    "528": "PAGA",
+    "570": "Sterling Bank",
+    "571": "UBA",
+    "572": "First Bank",
+    "573": "Access Bank",
+    "574": "GTBank",
+    "575": "Zenith Bank",
+    "576": "Wema Bank",
+    "583": "OPay",
+}
+
+def get_payment_name(payment_type) -> str:
+    """Return a human-readable payment name; fall back to bankName or raw type."""
+    return PAYMENT_TYPE_MAP.get(str(payment_type), f"Type {payment_type}")
+
+
+# ─────────────────────────────────────────
+# 🔐 Auth helpers  (credentials passed in)
 # ─────────────────────────────────────────
 def _generate_signature(api_key: str, api_secret: str,
                         timestamp: str, payload: str,
@@ -48,11 +76,8 @@ def _get_headers(api_key: str, api_secret: str, payload: str = "") -> dict:
     }
 
 
-# ─────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────
 def _parse_response(response, label=""):
-    logger.info(f"[Bybit]{label} HTTP {response.status_code} | {response.text[:500]}")
+    logger.info(f"[Bybit]{label} HTTP {response.status_code} | {response.text[:600]}")
     if not response.text.strip():
         return {"retCode": -1, "retMsg": "Empty response — check IP whitelist"}
     if response.status_code == 404:
@@ -61,6 +86,7 @@ def _parse_response(response, label=""):
         return {"retCode": -1, "retMsg": f"CDN block — HTTP {response.status_code}"}
     try:
         data = response.json()
+        # Normalise old-style keys
         if "ret_code" in data and "retCode" not in data:
             data["retCode"] = data["ret_code"]
             data["retMsg"]  = data.get("ret_msg", "")
@@ -101,7 +127,7 @@ def ping_api(api_key: str, api_secret: str) -> dict:
 
 
 # ─────────────────────────────────────────
-# 💲 BTC/USDT spot price  (public, no auth)
+# 💲 BTC/USDT spot price  (public)
 # ─────────────────────────────────────────
 def get_btc_usdt_price() -> float:
     try:
@@ -143,7 +169,60 @@ def get_my_ads(api_key: str, api_secret: str) -> dict:
 
 
 # ─────────────────────────────────────────
-# 🔄 Modify Ad
+# 📦 Pending / active orders
+#   status 10 = waiting for buyer payment
+#   status 20 = waiting for seller to release
+# ─────────────────────────────────────────
+def get_pending_orders(api_key: str, api_secret: str, status: int = 10) -> dict:
+    return _post(api_key, api_secret,
+                 "/v5/p2p/order/pending/simplifyList",
+                 {"status": status, "page": 1, "size": 30})
+
+
+# ─────────────────────────────────────────
+# 📄 Order Detail
+# ─────────────────────────────────────────
+def get_order_detail(api_key: str, api_secret: str, order_id: str) -> dict:
+    return _post(api_key, api_secret, "/v5/p2p/order/info", {"orderId": order_id})
+
+
+# ─────────────────────────────────────────
+# 👤 Counterparty Info
+# ─────────────────────────────────────────
+def get_counterparty_info(api_key: str, api_secret: str,
+                          user_id: str, order_id: str) -> dict:
+    return _post(api_key, api_secret, "/v5/p2p/user/order/personal/info", {
+        "originalUid": str(user_id),
+        "orderId":     str(order_id),
+    })
+
+
+# ─────────────────────────────────────────
+# 💬 Send Chat Message  (repeat `count` times)
+# ─────────────────────────────────────────
+def send_chat_message(api_key: str, api_secret: str,
+                      order_id: str, message: str, count: int = 1) -> dict:
+    last = {}
+    for _ in range(max(1, min(count, 5))):
+        last = _post(api_key, api_secret, "/v5/p2p/order/message/send", {
+            "orderId":     order_id,
+            "message":     message,
+            "contentType": "str",
+            "msgUuid":     uuid.uuid4().hex,
+        })
+    return last
+
+
+# ─────────────────────────────────────────
+# 🚀 Release / finish order
+# ─────────────────────────────────────────
+def release_order(api_key: str, api_secret: str, order_id: str) -> dict:
+    logger.info(f"[Bybit] RELEASE order: {order_id}")
+    return _post(api_key, api_secret, "/v5/p2p/order/finish", {"orderId": order_id})
+
+
+# ─────────────────────────────────────────
+# 🔄 Modify Ad price
 # ─────────────────────────────────────────
 def modify_ad(api_key: str, api_secret: str,
               ad_id: str, new_price: str, ad_data: dict) -> dict:
