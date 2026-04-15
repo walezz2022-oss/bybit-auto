@@ -338,15 +338,20 @@ def format_new_order(order: dict, buyer_info: dict) -> str:
     token      = order.get("tokenId",    "—")
     price      = order.get("price",      "—")
 
-    # Buyer info from counterparty endpoint
-    buyer_name   = buyer_info.get("realName",          "") or \
-                   buyer_info.get("nickName",           "—")
-    rating       = buyer_info.get("goodAppraiseRate",  "—")
-    total_orders = buyer_info.get("totalFinishCount",  "—")
-    recent_orders = buyer_info.get("recentFinishCount","—")
+    # buyerRealName is the KYC-verified full name in the order detail response.
+    # Fall back to counterparty realName then nickName if empty.
+    buyer_name = (
+        (order.get("buyerRealName") or "").strip()
+        or (buyer_info.get("realName") or "").strip()
+        or (buyer_info.get("nickName") or "").strip()
+        or "—"
+    )
+    rating        = buyer_info.get("goodAppraiseRate",  "—")
+    total_orders  = buyer_info.get("totalFinishCount",  "—")
+    recent_orders = buyer_info.get("recentFinishCount", "—")
 
     return (
-        f"📦 *New Order — Account needs payment*\n"
+        f"📦 *New Order — Awaiting Buyer Payment*\n"
         f"{'─' * 30}\n"
         f"🆔 `{order_id}`\n"
         f"💵 Amount: `{amount} {currency}`\n"
@@ -368,7 +373,10 @@ def format_paid_order(order: dict) -> str:
     token    = order.get("tokenId",    "—")
     price    = order.get("price",      "—")
 
-    # Payment details buyer sent money to
+    # Buyer's KYC-verified full name — from order detail directly
+    buyer_name = (order.get("buyerRealName") or "").strip() or "—"
+
+    # Payment details the buyer used (what they sent money to)
     pay_term   = order.get("confirmedPayTerm", {}) or {}
     if not pay_term:
         terms    = order.get("paymentTermList", [])
@@ -384,6 +392,8 @@ def format_paid_order(order: dict) -> str:
         f"🆔 `{order_id}`\n"
         f"💵 Amount: `{amount} {currency}`\n"
         f"🪙 Qty: `{quantity} {token}` @ `{price}`\n"
+        f"{'─' * 30}\n"
+        f"👤 Buyer: *{buyer_name}*\n"
         f"{'─' * 30}\n"
         f"🏦 Payment sent to:\n"
         f"  Bank/Channel: *{bank}*\n"
